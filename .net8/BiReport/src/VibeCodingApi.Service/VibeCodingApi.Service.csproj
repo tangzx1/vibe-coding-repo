@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\VibeCodingApi.IService\VibeCodingApi.IService.csproj" />
+    <ProjectReference Include="..\VibeCodingApi.Repository\VibeCodingApi.Repository.csproj" />
+    <ProjectReference Include="..\VibeCodingApi.Model\VibeCodingApi.Model.csproj" />
+    <ProjectReference Include="..\VibeCodingApi.Common\VibeCodingApi.Common.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
