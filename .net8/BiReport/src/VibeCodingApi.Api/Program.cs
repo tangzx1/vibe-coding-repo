@@ -2,10 +2,12 @@ using Microsoft.AspNetCore.Mvc;
 using VibeCodingApi.Api.Filters;
 using VibeCodingApi.Common.Models;
 using VibeCodingApi.IService;
+using VibeCodingApi.Repository.BiReport;
 using VibeCodingApi.Repository.Extensions;
 using VibeCodingApi.Repository.IRepository;
 using VibeCodingApi.Repository.Repository;
 using VibeCodingApi.Service;
+using VibeCodingApi.Service.BiReport;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +24,17 @@ builder.Services.AddScoped<ITruckRepository, TruckRepository>();
 builder.Services.AddScoped<ITruckService, TruckService>();
 builder.Services.AddScoped<ITruckLiftRecordRepository, TruckLiftRecordRepository>();
 builder.Services.AddScoped<ITruckLiftRecordService, TruckLiftRecordService>();
+
+// BI 报表即席查询。配置在注册期解析并校验：白名单为空、表名为空、表名重复、表名含非法字符，
+// 都会在启动时直接抛异常，不等某个请求打进来才发现。
+// 注意配置里只有「哪些表可查」，没有关联关系——关联条件由前端随每次查询提交。
+builder.Services.AddBiReport(builder.Configuration);
+// 元数据缓存跨请求共享，必须是单例——注册成 Scoped 的话每个请求都会重新打一次 information_schema，
+// 缓存等于没做
+builder.Services.AddSingleton<BiReportSchemaCache>();
+builder.Services.AddScoped<IBiReportRepository, BiReportRepository>();
+builder.Services.AddScoped<BiExcelExporter>();
+builder.Services.AddScoped<IBiReportService, BiReportService>();
 
 builder.Services
     .AddControllers(options =>
