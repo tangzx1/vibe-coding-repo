@@ -28,6 +28,7 @@ public sealed class BiReportSchemaCache
     private readonly ILogger<BiReportSchemaCache> _logger;
 
     /// <summary>刷新互斥锁：保证同一时刻只有一次元数据查询在跑。</summary>
+    /// 初始许可数为 1、最大许可数也为 1 的 SemaphoreSlim，然后异步等待获取这个许可。它实际上被用作一个异步互斥锁（async mutex）
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
 
     private readonly long _ttlMilliseconds;
@@ -58,6 +59,7 @@ public sealed class BiReportSchemaCache
     /// <param name="forceRefresh">true 表示忽略 TTL 强制刷新（DDL 变更后用）。</param>
     public async Task<BiReportSchemaDto> GetAsync(bool forceRefresh = false)
     {
+        //获取系统启动以来经过的毫秒数，返回一个 64 位整数（long）
         var requestedAt = Environment.TickCount64;
 
         var snapshot = Volatile.Read(ref _snapshot);
