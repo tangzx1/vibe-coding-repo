@@ -33,9 +33,9 @@ const totalColumns = computed(() =>
   props.schema?.tables.reduce((sum, table) => sum + table.columns.length, 0) ?? 0
 )
 
-const generatedAt = computed(() => {
+const generatedTime = computed(() => {
   const value = props.schema?.generated_at
-  return value ? value.replace('T', ' ').slice(0, 19) : ''
+  return value ? value.replace('T', ' ').slice(11, 19) : ''
 })
 
 const filteredTables = computed<TableItem[]>(() => {
@@ -104,7 +104,7 @@ watch(
         <div class="panel-title">表与字段</div>
         <div v-if="schema" class="schema-meta">
           {{ schema.tables.length }} 张表 · {{ totalColumns }} 个字段
-          <span v-if="generatedAt"> · 元数据 {{ generatedAt }}</span>
+          <span v-if="generatedTime"> · 更新 {{ generatedTime }}</span>
         </div>
       </div>
       <el-button size="small" text type="primary" :loading="loading" @click="emit('reload')">
@@ -138,6 +138,7 @@ watch(
           v-for="item in filteredTables"
           :key="item.table.table_name"
           :name="item.table.table_name"
+          :class="{ 'is-query-table': selectedTableSet.has(item.table.table_name) }"
         >
           <template #title>
             <div class="table-title">
@@ -196,76 +197,136 @@ watch(
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  background: var(--app-sidebar);
 }
 
 .schema-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex: none;
   gap: 8px;
-  padding: 12px 14px 6px;
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid #1e242b;
 }
 
 .panel-title {
-  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #dbe2ea;
+  font-size: 13.5px;
   font-weight: 600;
-  color: #303133;
+  letter-spacing: 0.3px;
+}
+
+.panel-title::before {
+  content: '';
+  flex: none;
+  width: 3px;
+  height: 13px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #5b9bff, #1f63d4);
+  box-shadow: 0 0 6px rgba(47, 124, 246, 0.45);
 }
 
 .schema-meta {
-  margin-top: 2px;
-  color: #909399;
-  font-size: 12px;
+  margin-top: 3px;
+  color: var(--app-text-faint);
+  font-size: 11.5px;
 }
 
 .schema-error {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 14px 14px;
+  padding: 10px 14px 14px;
 }
 
 .schema-search {
-  padding: 4px 12px 8px;
+  flex: none;
+  padding: 10px 12px 8px;
 }
 
 .schema-list {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 12px 12px;
+  padding: 0 10px 12px;
   border-top: none;
   border-bottom: none;
 }
 
 .schema-list :deep(.el-collapse-item__header) {
   height: auto;
-  min-height: 40px;
-  padding: 4px 0;
+  min-height: 38px;
+  padding: 4px 8px 4px 10px;
   line-height: 1.4;
+  border-left: 2px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.schema-list :deep(.el-collapse-item__header:hover) {
+  background: #141a20;
+}
+
+.schema-list :deep(.el-collapse-item.is-query-table > .el-collapse-item__header) {
+  border-left-color: var(--app-blue);
+  background: linear-gradient(90deg, rgba(47, 124, 246, 0.12), transparent 82%);
+}
+
+.schema-list :deep(.el-collapse-item__header.is-active) {
+  color: #eef3f8;
 }
 
 .schema-list :deep(.el-collapse-item__content) {
-  padding-bottom: 8px;
+  padding-bottom: 6px;
+  color: var(--app-text-regular);
+}
+
+.schema-list :deep(.el-collapse-item__arrow) {
+  color: #5f6a76;
 }
 
 .table-title {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex: 1;
+  flex-wrap: nowrap;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
   padding-right: 8px;
 }
 
 .table-name {
+  flex: none;
+  color: #c3ccd7;
   font-weight: 600;
-  color: #303133;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.is-query-table .table-name {
+  color: #ffffff;
 }
 
 .table-code {
-  color: #909399;
-  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-faint);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-title :deep(.el-tag),
+.table-title :deep(.el-button) {
+  flex: none;
 }
 
 .column-row {
@@ -273,12 +334,12 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 1px 0 1px 10px;
-  border-radius: 4px;
+  padding: 1px 4px 1px 14px;
+  border-radius: 2px;
 }
 
 .column-row:hover {
-  background: #f5f7fa;
+  background: var(--app-hover);
 }
 
 .column-checkbox {
@@ -292,22 +353,24 @@ watch(
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .column-display {
-  color: #303133;
+  color: #b7c1cd;
 }
 
 .column-code {
   margin-left: 6px;
-  color: #a8abb2;
-  font-size: 12px;
+  color: var(--app-text-faint);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .column-type {
   flex: none;
-  color: #c0c4cc;
-  font-size: 11px;
+  color: #5c6672;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 </style>

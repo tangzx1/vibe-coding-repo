@@ -91,9 +91,9 @@ function toggle(key: string): void {
 }
 
 .editor-hint {
-  color: #909399;
+  color: var(--app-text-faint);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 .group-content {
@@ -105,7 +105,7 @@ function toggle(key: string): void {
 }
 
 .group-empty {
-  color: #a8abb2;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 </style>

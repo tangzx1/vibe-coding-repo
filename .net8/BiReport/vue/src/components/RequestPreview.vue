@@ -45,33 +45,40 @@ async function copy(): Promise<void> {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
-  color: #606266;
+  color: var(--app-text-muted);
   font-size: 12px;
   line-height: 1.6;
 }
 
 .preview-meta code {
-  padding: 1px 4px;
-  background: #f5f7fa;
-  border-radius: 3px;
+  padding: 1px 5px;
+  border: 1px solid #262d36;
+  border-radius: 2px;
+  background: #0b0e12;
+  color: var(--app-blue-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .preview-count {
   flex: none;
-  color: #909399;
+  color: var(--app-text-faint);
 }
 
 .preview-json {
   margin: 0;
-  padding: 12px;
+  padding: 14px;
   max-height: calc(100vh - 220px);
   overflow: auto;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  border-radius: 6px;
+  background: #0a0d11;
+  border: 1px solid #262d36;
+  border-radius: 3px;
+  color: #c9d6e4;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.65;
   white-space: pre;
+}
+
+.preview-json::selection {
+  background: rgba(47, 124, 246, 0.35);
 }
 </style>

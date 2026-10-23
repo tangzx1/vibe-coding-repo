@@ -64,16 +64,6 @@ function nextPage(): void {
       :closable="false"
     />
 
-    <div v-if="result" class="result-stats">
-      <template v-if="result.total !== null">
-        共 <strong>{{ result.total }}</strong> 条 · 第 {{ result.page_index }} /
-        {{ Math.max(result.total_pages, 1) }} 页
-      </template>
-      <template v-else>
-        未统计总数 · 第 {{ result.page_index }} 页（本页 {{ result.items.length }} 条）
-      </template>
-    </div>
-
     <el-table
       v-loading="loading"
       :data="rows"
@@ -95,25 +85,38 @@ function nextPage(): void {
       </el-table-column>
     </el-table>
 
-    <div v-if="result" class="result-pager">
-      <el-pagination
-        v-if="result.total !== null"
-        background
-        layout="total, sizes, prev, pager, next, jumper"
-        :total="result.total"
-        :current-page="result.page_index"
-        :page-size="result.page_size"
-        :page-sizes="[10, 20, 50, 100, 200]"
-        @current-change="onCurrentChange"
-        @size-change="onSizeChange"
-      />
+    <div v-if="result" class="result-footer">
+      <div class="result-stats">
+        <template v-if="result.total !== null">
+          共 <strong>{{ result.total }}</strong> 条 · 第 {{ result.page_index }} /
+          {{ Math.max(result.total_pages, 1) }} 页 · {{ result.columns.length }} 列
+        </template>
+        <template v-else>
+          未统计总数 · 第 {{ result.page_index }} 页（本页 {{ result.items.length }} 条）
+          · {{ result.columns.length }} 列
+        </template>
+      </div>
 
-      <div v-else class="simple-pager">
-        <el-button size="small" :disabled="result.page_index <= 1" @click="prevPage">
-          上一页
-        </el-button>
-        <span class="simple-page-no">第 {{ result.page_index }} 页</span>
-        <el-button size="small" :disabled="!canNext" @click="nextPage">下一页</el-button>
+      <div class="result-pager">
+        <el-pagination
+          v-if="result.total !== null"
+          background
+          layout="sizes, prev, pager, next, jumper"
+          :total="result.total"
+          :current-page="result.page_index"
+          :page-size="result.page_size"
+          :page-sizes="[10, 20, 50, 100, 200]"
+          @current-change="onCurrentChange"
+          @size-change="onSizeChange"
+        />
+
+        <div v-else class="simple-pager">
+          <el-button size="small" :disabled="result.page_index <= 1" @click="prevPage">
+            上一页
+          </el-button>
+          <span class="simple-page-no">第 {{ result.page_index }} 页</span>
+          <el-button size="small" :disabled="!canNext" @click="nextPage">下一页</el-button>
+        </div>
       </div>
     </div>
   </div>
@@ -126,18 +129,31 @@ function nextPage(): void {
   gap: 10px;
 }
 
+.result-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding-top: 10px;
+  border-top: 1px solid #232a32;
+}
+
 .result-stats {
-  color: #606266;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 
 .result-stats strong {
-  color: #303133;
+  margin: 0 2px;
+  color: var(--app-text);
+  font-weight: 600;
 }
 
 .result-pager {
   display: flex;
   justify-content: flex-end;
+  margin-left: auto;
 }
 
 .simple-pager {
@@ -147,7 +163,7 @@ function nextPage(): void {
 }
 
 .simple-page-no {
-  color: #606266;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 </style>

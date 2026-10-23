@@ -161,19 +161,19 @@ function onSort(field: OutputFieldState, value: unknown): void {
 }
 
 .editor-hint {
-  color: #909399;
+  color: var(--app-text-faint);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 .field-name {
-  color: #303133;
-  font-size: 13px;
+  color: #cdd5df;
+  font-size: 12.5px;
 }
 
 .field-code {
   margin-top: 1px;
-  color: #a8abb2;
+  color: var(--app-text-faint);
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }

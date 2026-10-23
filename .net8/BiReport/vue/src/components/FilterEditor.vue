@@ -287,13 +287,13 @@ function onList(filter: FilterState, value: string): void {
 }
 
 .editor-hint {
-  color: #909399;
+  color: var(--app-text-faint);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 .filter-empty {
-  color: #a8abb2;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 
@@ -303,14 +303,14 @@ function onList(filter: FilterState, value: string): void {
   flex-wrap: wrap;
   gap: 8px;
   padding-bottom: 8px;
-  border-bottom: 1px dashed #ebeef5;
+  border-bottom: 1px dashed #262d36;
 }
 
 .filter-index {
   flex: none;
   width: 20px;
-  line-height: 24px;
-  color: #909399;
+  line-height: 28px;
+  color: var(--app-text-muted);
   font-size: 12px;
   text-align: right;
 }
@@ -348,19 +348,19 @@ function onList(filter: FilterState, value: string): void {
 }
 
 .range-sep {
-  color: #909399;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 
 .no-value {
   display: inline-block;
-  line-height: 24px;
-  color: #a8abb2;
+  line-height: 28px;
+  color: var(--app-text-faint);
   font-size: 12px;
 }
 
 .filter-remove {
   flex: none;
-  line-height: 24px;
+  line-height: 28px;
 }
 </style>

@@ -205,9 +205,14 @@ function onRightColumn(join: JoinState, value: unknown): void {
 }
 
 .editor-hint {
-  color: #909399;
+  color: var(--app-text-faint);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
+}
+
+.editor-hint strong {
+  color: #cdd5df;
+  font-weight: 600;
 }
 
 .join-block {
@@ -226,7 +231,7 @@ function onRightColumn(join: JoinState, value: unknown): void {
 .join-index {
   flex: none;
   width: 56px;
-  color: #606266;
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 
@@ -243,13 +248,13 @@ function onRightColumn(join: JoinState, value: unknown): void {
 }
 
 .join-equals {
-  color: #909399;
+  color: var(--app-blue-soft);
   font-weight: 600;
 }
 
 .join-warning {
   margin-left: 64px;
-  color: #e6a23c;
+  color: var(--app-amber);
   font-size: 12px;
 }
 </style>

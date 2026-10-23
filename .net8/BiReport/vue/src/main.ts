@@ -2,6 +2,8 @@ import { createApp } from 'vue'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
+// Element Plus 深色变量：与页面上的深色工业风主题配套使用
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 import './styles/index.css'
 

@@ -891,6 +891,23 @@ export function useQueryBuilder() {
     }
   }
 
+  /** 清空当前查询条件（保留元数据），用于重新开始一次报表配置 */
+  function resetConditions(): void {
+    tables.value = []
+    fields.value = []
+    joins.value = []
+    filters.value = []
+    manualGroupFields.value = []
+    groupMode.value = 'auto'
+    pageIndex.value = 1
+    result.value = null
+    errorMessage.value = ''
+    executedSignature.value = null
+    // 让仍在途中的查询结果失效；同时收起 loading，避免按钮一直转圈
+    querySequence += 1
+    loading.value = false
+  }
+
   // -------------------------------------------------------------------------
   // 分页
   // -------------------------------------------------------------------------
@@ -951,6 +968,7 @@ export function useQueryBuilder() {
     removeFilter,
     setGroupMode,
     setManualGroups,
+    resetConditions,
 
     // 分页
     pageIndex,

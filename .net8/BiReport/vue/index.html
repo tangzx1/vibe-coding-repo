@@ -1,9 +1,22 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>BI 报表查询</title>
+    <meta name="theme-color" content="#090b0e" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpolygon points='22,3 39,12 22,21 5,12' fill='%234a9eff'/%3E%3Cpolygon points='5,12 22,21 22,41 5,32' fill='%231f5fd0'/%3E%3Cpolygon points='39,12 22,21 22,41 39,32' fill='%2325c0d8'/%3E%3C/svg%3E"
+    />
+    <title>元矿山 · BI 报表</title>
+    <style>
+      /* 首屏在样式表加载前就使用深色底，避免白屏闪烁 */
+      html,
+      body {
+        margin: 0;
+        background: #090b0e;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
