@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace VibeCodingApi.Model.Dtos;
 
 /// <summary>
@@ -42,6 +44,39 @@ public class BiReportTableSchemaDto
 
     /// <summary>字段列表，按数据库里的列顺序排列。</summary>
     public List<BiReportColumnSchemaDto> columns { get; set; } = new();
+
+    /// <summary>
+    /// 物理库名；null 表示当前连接默认库。跨库表生成 SQL 时会拼成 <c>`库`.`表`</c>。
+    /// <para>仅服务端编译 SQL 使用，不下发给前端：前端的请求只认识逻辑表名。</para>
+    /// </summary>
+    [JsonIgnore]
+    public string? database { get; set; }
+
+    /// <summary>
+    /// 按月分表的物理表清单，按月份升序；空表示普通表（直接引用 <see cref="table_name"/>）。
+    /// <para>仅服务端编译 SQL 使用，不下发给前端。</para>
+    /// </summary>
+    [JsonIgnore]
+    public List<BiReportShardSchemaDto> shards { get; set; } = new();
+
+    /// <summary>
+    /// 分表日期字段（数据库列名），用于按 WHERE 里的日期过滤裁剪要扫的物理分表；
+    /// 非分表或未配置时为 null。仅服务端使用，不下发给前端。
+    /// </summary>
+    [JsonIgnore]
+    public string? shard_date_column { get; set; }
+}
+
+/// <summary>
+/// 一张物理分表的元数据（仅服务端使用，不参与接口序列化）。
+/// </summary>
+public class BiReportShardSchemaDto
+{
+    /// <summary>物理表名，如 <c>load_shovel_task_record_20250501</c>。</summary>
+    public string table_name { get; set; } = string.Empty;
+
+    /// <summary>该分表覆盖月份的 1 日 00:00:00，用于和查询的日期范围做交集。</summary>
+    public DateTime period_start { get; set; }
 }
 
 /// <summary>

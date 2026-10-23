@@ -55,6 +55,47 @@ public class BiReportSqlBuilderTests
         }
     };
 
+    /// <summary>跨库 + 按月分表的元数据：shovel 在默认库，load_shovel_task_record 在 dispatch_log，按月分表。</summary>
+    private static readonly BiReportSchemaDto ShardSchema = new()
+    {
+        generated_at = new DateTime(2026, 1, 1),
+        tables = new List<BiReportTableSchemaDto>
+        {
+            new()
+            {
+                table_name = "shovel",
+                display_name = "铲车信息",
+                columns = new List<BiReportColumnSchemaDto>
+                {
+                    Column("id", "int"),
+                    Column("Shovel_code", "varchar"),
+                    Column("Shovel_name", "varchar")
+                }
+            },
+            new()
+            {
+                table_name = "load_shovel_task_record",
+                display_name = "铲装任务记录",
+                database = "dispatch_log",
+                shard_date_column = "working_date",
+                shards = new List<BiReportShardSchemaDto>
+                {
+                    new() { table_name = "load_shovel_task_record_20250401", period_start = new DateTime(2025, 4, 1) },
+                    new() { table_name = "load_shovel_task_record_20250501", period_start = new DateTime(2025, 5, 1) },
+                    new() { table_name = "load_shovel_task_record_20250601", period_start = new DateTime(2025, 6, 1) },
+                    new() { table_name = "load_shovel_task_record_20250701", period_start = new DateTime(2025, 7, 1) }
+                },
+                columns = new List<BiReportColumnSchemaDto>
+                {
+                    Column("id", "bigint"),
+                    Column("shovel_code", "varchar"),
+                    Column("load_capacity", "double"),
+                    Column("working_date", "datetime")
+                }
+            }
+        }
+    };
+
     private static BiReportColumnSchemaDto Column(string name, string dataType) => new()
     {
         column_name = name,
@@ -64,6 +105,19 @@ public class BiReportSqlBuilderTests
         is_date = BiIdentifier.IsDateType(dataType),
         is_string = BiIdentifier.IsStringType(dataType)
     };
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
+    }
 
     /// <summary>断言 SQL 文本时关掉优化器提示，用例才读得清；提示本身有单独的用例覆盖。</summary>
     private static BiReportOptions CreateOptions() => new()
@@ -287,6 +341,170 @@ public class BiReportSqlBuilderTests
             "FROM `truck` AS t0 LEFT JOIN `truck_lift_record` AS t1 ON t0.`truck_code` = t1.`truck_code`",
             command.Sql,
             StringComparison.Ordinal);
+    }
+
+    // ---------- 跨库与按月分表 ----------
+
+    [Fact]
+    public void 关联按月分表_按日期过滤裁剪分表并只SELECT引用列()
+    {
+        var request = new BiReportQueryDto
+        {
+            tables = new List<BiReportTableRefDto>
+            {
+                new() { table = "shovel", alias = "s" },
+                new() { table = "load_shovel_task_record", alias = "r" }
+            },
+            joins = new List<BiReportJoinDto>
+            {
+                new()
+                {
+                    join_type = "left",
+                    left_table = "s",
+                    left_column = "Shovel_code",
+                    right_table = "r",
+                    right_column = "shovel_code"
+                }
+            },
+            select = new List<BiReportSelectDto>
+            {
+                new() { field = "r.id", aggregate = "count", alias = "任务数" },
+                new() { field = "r.load_capacity", aggregate = "sum", alias = "总装载量" }
+            },
+            // 只查 5、6 两个月：4 月和 7 月的物理分表不应该出现在 SQL 里
+            where = new List<BiReportFilterDto>
+            {
+                new() { field = "r.working_date", op = "between", value = Json("[\"2025-05-01\", \"2025-06-30\"]") }
+            },
+            order_by = new List<BiReportOrderByDto> { new() { field = "任务数", desc = true } }
+        };
+
+        var command = BiReportSqlBuilder.BuildSelect(request, ShardSchema, CreateOptions());
+
+        // 分表被 UNION ALL 成一个派生表，仍由服务端别名 t1 引用；
+        // 每张分表只 SELECT 本次查询真正用到的列（join / 过滤 / 统计）
+        Assert.Equal(
+            "SELECT COUNT(t1.`id`) AS `任务数`, SUM(t1.`load_capacity`) AS `总装载量` " +
+            "FROM `shovel` AS t0 " +
+            "LEFT JOIN (SELECT `id`, `shovel_code`, `load_capacity`, `working_date` " +
+            "FROM `dispatch_log`.`load_shovel_task_record_20250501` " +
+            "UNION ALL SELECT `id`, `shovel_code`, `load_capacity`, `working_date` " +
+            "FROM `dispatch_log`.`load_shovel_task_record_20250601`) AS t1 " +
+            "ON t0.`Shovel_code` = t1.`shovel_code` " +
+            "WHERE t1.`working_date` BETWEEN @p0 AND @p1 " +
+            "ORDER BY COUNT(t1.`id`) DESC " +
+            "LIMIT @p2 OFFSET @p3",
+            command.Sql);
+
+        Assert.DoesNotContain("20250401", command.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("20250701", command.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 分表查询没有日期过滤时_扫描全部分表()
+    {
+        var request = new BiReportQueryDto
+        {
+            tables = new List<BiReportTableRefDto> { new() { table = "load_shovel_task_record", alias = "r" } },
+            select = new List<BiReportSelectDto>
+            {
+                new() { field = "r.id", aggregate = "count", alias = "任务数" }
+            },
+            order_by = new List<BiReportOrderByDto> { new() { field = "任务数", desc = true } }
+        };
+
+        var command = BiReportSqlBuilder.BuildSelect(request, ShardSchema, CreateOptions());
+
+        // 没有日期条件就无法推断月份，保守地扫全部分表（数量受 MaxShardsPerTable 约束）
+        Assert.Equal(3, CountOccurrences(command.Sql, "UNION ALL"));
+        Assert.Contains("`dispatch_log`.`load_shovel_task_record_20250401`", command.Sql, StringComparison.Ordinal);
+        Assert.Contains("`dispatch_log`.`load_shovel_task_record_20250701`", command.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 日期范围与所有分表都不相交时_用恒假分支保留列结构()
+    {
+        var request = new BiReportQueryDto
+        {
+            tables = new List<BiReportTableRefDto> { new() { table = "load_shovel_task_record", alias = "r" } },
+            select = new List<BiReportSelectDto>
+            {
+                new() { field = "r.id", aggregate = "count", alias = "任务数" }
+            },
+            // 分表只到 2025-07，2026 年的数据必然为空
+            where = new List<BiReportFilterDto>
+            {
+                new() { field = "r.working_date", op = ">=", value = Json("\"2026-01-01\"") }
+            },
+            order_by = new List<BiReportOrderByDto> { new() { field = "任务数", desc = true } }
+        };
+
+        var command = BiReportSqlBuilder.BuildSelect(request, ShardSchema, CreateOptions());
+
+        // 仍然要生成一个列结构正确的派生表，只是用 WHERE 1=0 让它必然返回空集
+        Assert.Contains(
+            "FROM `dispatch_log`.`load_shovel_task_record_20250701` WHERE 1=0",
+            command.Sql,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("20250401", command.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 日期过滤用in时_只保留命中的月份分表()
+    {
+        var request = new BiReportQueryDto
+        {
+            tables = new List<BiReportTableRefDto> { new() { table = "load_shovel_task_record", alias = "r" } },
+            select = new List<BiReportSelectDto>
+            {
+                new() { field = "r.id", aggregate = "count", alias = "任务数" }
+            },
+            where = new List<BiReportFilterDto>
+            {
+                new() { field = "r.working_date", op = "in", value = Json("[\"2025-05-01\", \"2025-07-01\"]") }
+            },
+            order_by = new List<BiReportOrderByDto> { new() { field = "任务数", desc = true } }
+        };
+
+        var command = BiReportSqlBuilder.BuildSelect(request, ShardSchema, CreateOptions());
+
+        Assert.Contains("20250501", command.Sql, StringComparison.Ordinal);
+        Assert.Contains("20250701", command.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("20250401", command.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("20250601", command.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void 普通表配置了库名时_生成库限定名()
+    {
+        var schema = new BiReportSchemaDto
+        {
+            generated_at = new DateTime(2026, 1, 1),
+            tables = new List<BiReportTableSchemaDto>
+            {
+                new()
+                {
+                    table_name = "shovel",
+                    display_name = "铲车信息",
+                    database = "dispatch",
+                    columns = new List<BiReportColumnSchemaDto>
+                    {
+                        Column("id", "int"),
+                        Column("Shovel_code", "varchar")
+                    }
+                }
+            }
+        };
+
+        var request = new BiReportQueryDto
+        {
+            tables = new List<BiReportTableRefDto> { new() { table = "shovel", alias = "s" } },
+            select = new List<BiReportSelectDto> { new() { field = "s.Shovel_code" } }
+        };
+
+        var command = BiReportSqlBuilder.BuildSelect(request, schema, CreateOptions());
+
+        Assert.Contains("FROM `dispatch`.`shovel` AS t0", command.Sql, StringComparison.Ordinal);
     }
 
     // ---------- 过滤运算符 ----------
@@ -1039,6 +1257,24 @@ public class BiReportSqlBuilderTests
     {
         Assert.False(BiIdentifier.IsValid(input));
         Assert.Throws<BusinessException>(() => BiIdentifier.Quote(input));
+    }
+
+    [Theory]
+    [InlineData(null, "shovel", "`shovel`")]
+    [InlineData("", "shovel", "`shovel`")]
+    [InlineData("dispatch_log", "load_shovel_task_record_20250501", "`dispatch_log`.`load_shovel_task_record_20250501`")]
+    public void 库名和表名分别包裹(string? database, string table, string expected)
+    {
+        Assert.Equal(expected, BiIdentifier.QuoteTable(database, table));
+    }
+
+    [Theory]
+    [InlineData("dispatch log")]
+    [InlineData("dispatch.log")]
+    [InlineData("dispatch`log")]
+    public void 非法库名被拒绝(string database)
+    {
+        Assert.Throws<BusinessException>(() => BiIdentifier.QuoteTable(database, "shovel"));
     }
 
     [Theory]

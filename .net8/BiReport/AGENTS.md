@@ -118,9 +118,10 @@ src/VibeCodingApi.Service/
 
 1. **SQL 文本里只能出现枚举常量或经 `BiIdentifier.Quote` 包裹的标识符**，任何来自请求的「值」
    一律走 `SugarParameter`。表别名（`t0`/`t1`…）由服务端按下标生成，用户填的别名一个字符都不进 SQL。
-2. **不做自由表达式列**（OR / HAVING / DISTINCT / 日期函数 / 跨库表都不支持）。要扩展就加
+2. **不做自由表达式列**（OR / HAVING / DISTINCT / 日期函数都不支持）。要扩展就加
    **枚举型**参数（如 `{ "transform": "month" }` 由服务端生成 `DATE_FORMAT(...)`），
-   而不是接受用户传表达式——那会一瞬间绕开所有守卫。
+   而不是接受用户传表达式——那会一瞬间绕开所有守卫。跨库只支持**同一 MySQL 实例内、
+   由配置声明的库名**（`BiReportTableOption.Database`），库名不接受请求传入。
 3. **校验只写一次**，全部在 `BiReportSqlBuilder` 里。它本来就是唯一生成 SQL 的地方，是权威出口；
    在 Service 里再校验一遍只会得到两份会各自漂移的规则。
 
@@ -128,6 +129,34 @@ src/VibeCodingApi.Service/
 现场给出，服务端只校验两端列存在且类型同族，不做预置也不做推荐——加表、改表结构都不需要同步
 维护一份关联清单。想让前端少走弯路，就把「同族字段才能互连」这条规则做成 UI 上的候选过滤，
 而不是回到配置里写一份会过期的清单。
+
+### 跨库与按月分表
+
+分表也是「一张逻辑表」，配置在 `BiQuery.Tables` 里多写四个键即可，前端元数据契约不变：
+
+```json
+{
+  "Name": "load_shovel_task_record",
+  "Database": "dispatch_log",
+  "ShardTablePrefix": "load_shovel_task_record_",
+  "ShardNameDateFormat": "yyyyMMdd",
+  "ShardDateColumn": "working_date"
+}
+```
+
+- `Database`：物理表所在库，必须和默认连接指向**同一个 MySQL 实例**，否则一条 SQL 里没法 join。
+- `ShardTablePrefix` + `ShardNameDateFormat`：启动后从 `information_schema` 按前缀发现物理表，
+  后缀按固定格式解析出月份；后缀不合法（备份表、人工表）直接忽略，同月出现两张分表则整张逻辑表报错。
+- `ShardDateColumn`：WHERE 里对这个字段的 `=` / `>` / `>=` / `<` / `<=` / `between` / `in`
+  会用来**按月份裁剪**要 UNION 的物理分表。裁剪只减少扫描量、不改变语义，精确过滤仍由 WHERE 执行；
+  条件的边界月会被保守保留。没有可用日期条件时扫描全部分表，上限是 `MaxShardsPerTable`。
+- 生成 SQL 时所有选中的分表被 `UNION ALL` 成一个派生表，外层仍用服务端别名 `t0`/`t1`… 引用，
+  join / 过滤 / 分组 / 排序的写法与普通表完全一致。派生表只 SELECT 本次查询实际引用到的列。
+- 分表列不一致时元数据只暴露**所有分表共有的列**（按最新分表的列顺序和类型），
+  保证 UNION 不会因老分表缺列而报错。物理分表名来自 `information_schema`，进 SQL 前仍要再过一遍
+  `BiIdentifier` 校验。
+
+> ⚠ 分表发现发生在元数据刷新时；新建/删除分表后需要等缓存过期或调用 `metadata-refresh`。
 
 配置见 `appsettings.json` 的 `BiQuery` 节（可查询表白名单 + 各项限额），
 生产部署建议给这个模块单独配只读账号——当前连接串用的是 `root`。

@@ -54,6 +54,13 @@ public class BiReportOptions
     /// <summary>元数据缓存有效期（秒）。DDL 变更后最长滞后这么久，也可以调刷新接口立即生效。</summary>
     public int SchemaCacheSeconds { get; set; } = 300;
 
+    /// <summary>
+    /// 单张按月分表的逻辑表最多合并多少个物理分表。超过则跳过该表并告警，
+    /// 防止前缀配错（比如把整个库的表都匹配进来）生成超大 SQL。
+    /// 按月分表 240 张约等于 20 年。
+    /// </summary>
+    public int MaxShardsPerTable { get; set; } = 240;
+
     /// <summary>是否允许调用元数据刷新接口。无鉴权部署时可关掉。</summary>
     public bool MetadataRefreshEnabled { get; set; } = true;
 

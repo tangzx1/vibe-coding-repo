@@ -69,7 +69,77 @@ public static class BiReportExtensions
                 $"{BiReportOptions.SectionName}.Tables 中表名重复：{duplicated.Key}。");
         }
 
+        // 跨库 / 分表配置同样在启动期校验。数据库名、分表前缀、分表日期字段最终都会
+        // 参与标识符拼接（或用于发现物理表），配错时宁可启动失败，也不要等刷新元数据才报
+        foreach (var table in options.Tables)
+        {
+            ValidateSourceOptions(table);
+        }
+
+        if (options.MaxShardsPerTable < 1)
+        {
+            throw new InvalidOperationException(
+                $"{BiReportOptions.SectionName}.MaxShardsPerTable 必须大于 0，当前为 {options.MaxShardsPerTable}。");
+        }
+
         services.AddSingleton(options);
         return services;
+    }
+
+    /// <summary>
+    /// 校验一张表的跨库 / 分表配置。逻辑与表名校验一致：所有会进入 SQL 或参与物理表发现的
+    /// 名字都必须能过标识符守卫，且分表日期格式必须是白名单里的固定格式。
+    /// </summary>
+    private static void ValidateSourceOptions(BiReportTableOption table)
+    {
+        var name = table.Name.Trim();
+
+        if (!string.IsNullOrWhiteSpace(table.Database) && !BiIdentifier.IsValid(table.Database.Trim()))
+        {
+            throw new InvalidOperationException(
+                $"{BiReportOptions.SectionName}.Tables 中表 {name} 的 Database={table.Database} 含不受支持的字符" +
+                "（只允许字母、数字、下划线和汉字，且不能以数字开头）。");
+        }
+
+        var hasShardPrefix = !string.IsNullOrWhiteSpace(table.ShardTablePrefix);
+        var hasShardDateColumn = !string.IsNullOrWhiteSpace(table.ShardDateColumn);
+
+        if (!hasShardPrefix)
+        {
+            if (hasShardDateColumn)
+            {
+                throw new InvalidOperationException(
+                    $"{BiReportOptions.SectionName}.Tables 中表 {name} 配置了 ShardDateColumn，" +
+                    "但没有配置 ShardTablePrefix；只有分表才需要日期字段。");
+            }
+
+            return;
+        }
+
+        var prefix = table.ShardTablePrefix!.Trim();
+        if (!BiIdentifier.IsValid(prefix))
+        {
+            throw new InvalidOperationException(
+                $"{BiReportOptions.SectionName}.Tables 中表 {name} 的 ShardTablePrefix={table.ShardTablePrefix} " +
+                "含不受支持的字符（只允许字母、数字、下划线和汉字，且不能以数字开头）。");
+        }
+
+        var dateFormat = string.IsNullOrWhiteSpace(table.ShardNameDateFormat)
+            ? BiReportTableOption.DefaultShardNameDateFormat
+            : table.ShardNameDateFormat.Trim();
+
+        if (!BiReportTableOption.SupportedShardNameDateFormats.Contains(dateFormat, StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{BiReportOptions.SectionName}.Tables 中表 {name} 的 ShardNameDateFormat={table.ShardNameDateFormat} " +
+                $"不受支持，只允许：{string.Join("、", BiReportTableOption.SupportedShardNameDateFormats)}。");
+        }
+
+        if (hasShardDateColumn && !BiIdentifier.IsValid(table.ShardDateColumn!.Trim()))
+        {
+            throw new InvalidOperationException(
+                $"{BiReportOptions.SectionName}.Tables 中表 {name} 的 ShardDateColumn={table.ShardDateColumn} " +
+                "含不受支持的字符（只允许字母、数字、下划线和汉字，且不能以数字开头）。");
+        }
     }
 }

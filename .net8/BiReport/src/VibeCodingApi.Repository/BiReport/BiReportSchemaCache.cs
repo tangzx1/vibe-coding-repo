@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using SqlSugar;
 using VibeCodingApi.Model.Dtos;
@@ -105,37 +106,12 @@ public sealed class BiReportSchemaCache
 
     private async Task<BiReportSchemaDto> BuildAsync()
     {
-        var configured = _options.Tables;
-
-        var parameters = new SugarParameter[configured.Count];
-        var placeholders = new string[configured.Count];
-        for (var i = 0; i < configured.Count; i++)
-        {
-            placeholders[i] = "@t" + i;
-            // 白名单表名来自配置而非请求，但仍然走参数，免得「配置里多打了个引号」变成语法错误
-            parameters[i] = new SugarParameter(placeholders[i], configured[i].Name.Trim());
-        }
-
-        var dataTable = await _db.Ado.GetDataTableAsync(BuildMetadataSql(placeholders), parameters);
-        var rows = ReadRows(dataTable);
-
         var schema = new BiReportSchemaDto { generated_at = DateTime.Now };
         var missing = new List<string>();
 
-        foreach (var tableOption in configured)
+        foreach (var tableOption in _options.Tables)
         {
-            var tableName = tableOption.Name.Trim();
-            var tableRows = rows
-                .Where(row => string.Equals(row.TableName, tableName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (tableRows.Count == 0)
-            {
-                missing.Add(tableName);
-                continue;
-            }
-
-            var table = BuildTable(tableOption, tableRows);
+            var table = await BuildTableAsync(tableOption, missing);
             if (table is not null)
             {
                 schema.tables.Add(table);
@@ -150,7 +126,7 @@ public sealed class BiReportSchemaCache
         {
             _logger.LogWarning(
                 "BI 报表白名单中有 {MissingCount} 张表读不到元数据，已跳过：{MissingTables}。" +
-                "请确认表名正确，且连接账号对 information_schema 可见这些表。",
+                "请确认表名、Database / 分表配置正确，且连接账号对 information_schema 可见这些表。",
                 missing.Count,
                 string.Join("、", missing));
         }
@@ -158,8 +134,8 @@ public sealed class BiReportSchemaCache
         if (schema.tables.Count == 0)
         {
             throw new InvalidOperationException(
-                $"BI 报表白名单中的 {configured.Count} 张表全部读不到元数据（{string.Join("、", missing)}）。" +
-                "通常是连接账号对 information_schema 的可见性受限，或表名配置有误。");
+                $"BI 报表白名单中的 {_options.Tables.Count} 张表全部读不到元数据（{string.Join("、", missing)}）。" +
+                "通常是连接账号对 information_schema 的可见性受限，或表名 / 分表配置有误。");
         }
 
         _logger.LogInformation(
@@ -170,23 +146,240 @@ public sealed class BiReportSchemaCache
         return schema;
     }
 
-    private static string BuildMetadataSql(IReadOnlyList<string> placeholders) => $"""
-        SELECT t.TABLE_NAME      AS table_name,
-               t.TABLE_COMMENT   AS table_comment,
-               c.COLUMN_NAME     AS column_name,
-               c.DATA_TYPE       AS data_type,
-               c.IS_NULLABLE     AS is_nullable,
-               c.COLUMN_COMMENT  AS column_comment
-        FROM information_schema.TABLES t
-        JOIN information_schema.COLUMNS c
-          ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
-        WHERE t.TABLE_SCHEMA = DATABASE()
-          AND t.TABLE_TYPE = 'BASE TABLE'
-          AND t.TABLE_NAME IN ({string.Join(", ", placeholders)})
-        ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION
-        """;
+    /// <summary>
+    /// 读取一张逻辑表的元数据。普通表读一张物理表；分表先发现物理分表，再取所有分表的列交集。
+    /// 读不到 / 配置与库不一致时返回 null 并记日志，由 <see cref="BuildAsync"/> 决定是降级还是整体失败。
+    /// </summary>
+    private async Task<BiReportTableSchemaDto?> BuildTableAsync(
+        BiReportTableOption tableOption,
+        List<string> missing)
+    {
+        var logicalName = tableOption.Name.Trim();
+        var database = string.IsNullOrWhiteSpace(tableOption.Database)
+            ? null
+            : tableOption.Database.Trim();
 
-    private static List<MetadataRow> ReadRows(DataTable dataTable)
+        // 普通表：逻辑名就是物理表名
+        if (string.IsNullOrWhiteSpace(tableOption.ShardTablePrefix))
+        {
+            var rows = await LoadColumnsAsync(database, new[] { logicalName });
+            if (rows.Count == 0)
+            {
+                missing.Add(logicalName);
+                return null;
+            }
+
+            return BuildTable(tableOption, logicalName, rows, database, null, null);
+        }
+
+        // 分表：先按前缀发现物理表，再读它们的字段
+        var prefix = tableOption.ShardTablePrefix.Trim();
+        var dateFormat = string.IsNullOrWhiteSpace(tableOption.ShardNameDateFormat)
+            ? BiReportTableOption.DefaultShardNameDateFormat
+            : tableOption.ShardNameDateFormat.Trim();
+
+        var (shards, shardError) = await LoadShardsAsync(database, prefix, dateFormat, logicalName);
+        if (shardError is not null)
+        {
+            _logger.LogError("BI 报表分表 {Table} 配置无法使用：{Error}，已跳过该表。", logicalName, shardError);
+            missing.Add(logicalName);
+            return null;
+        }
+
+        if (shards.Count == 0)
+        {
+            missing.Add(logicalName);
+            return null;
+        }
+
+        if (shards.Count > _options.MaxShardsPerTable)
+        {
+            _logger.LogError(
+                "BI 报表分表 {Table} 匹配到 {ShardCount} 张物理表，超过上限 {MaxShards}，已跳过。" +
+                "请清理过期分表，或把 ShardTablePrefix 配得更精确。",
+                logicalName,
+                shards.Count,
+                _options.MaxShardsPerTable);
+            missing.Add(logicalName);
+            return null;
+        }
+
+        var shardRows = await LoadColumnsAsync(database, shards.Select(shard => shard.TableName).ToList());
+        var rowsByTable = shardRows
+            .GroupBy(row => row.TableName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        // 任何一张分表读不到字段都直接跳过整张逻辑表：只合并一部分分表会让查询结果静默缺数据
+        var unreadable = shards.FirstOrDefault(shard => !rowsByTable.ContainsKey(shard.TableName));
+        if (unreadable is not null)
+        {
+            _logger.LogError(
+                "BI 报表分表 {Table} 的物理表 {Shard} 读不到字段元数据，已跳过该逻辑表。",
+                logicalName,
+                unreadable.TableName);
+            missing.Add(logicalName);
+            return null;
+        }
+
+        var shardDateColumn = string.IsNullOrWhiteSpace(tableOption.ShardDateColumn)
+            ? null
+            : tableOption.ShardDateColumn.Trim();
+
+        if (shardDateColumn is not null)
+        {
+            var dateColumn = shardRows.FirstOrDefault(row =>
+                string.Equals(row.ColumnName, shardDateColumn, StringComparison.OrdinalIgnoreCase));
+
+            // 配了日期字段但库里没有（或类型不是日期）：降级为「不裁剪分表」，仍然可以查询
+            if (dateColumn is null || !BiIdentifier.IsDateType(dateColumn.DataType))
+            {
+                _logger.LogWarning(
+                    "BI 报表分表 {Table} 的 ShardDateColumn={Column} 不存在或不是日期类型，分表裁剪已关闭，" +
+                    "查询会扫描全部分表。",
+                    logicalName,
+                    shardDateColumn);
+                shardDateColumn = null;
+            }
+        }
+
+        return BuildTable(tableOption, logicalName, shardRows, database, shards, shardDateColumn);
+    }
+
+    /// <summary>
+    /// 按前缀发现物理分表，并解析表名里的日期后缀。
+    /// 返回错误字符串表示「这张逻辑表不能用」（非法表名、同月多张表等），而不是静默少算数据。
+    /// </summary>
+    private async Task<(List<ShardTableInfo> Shards, string? Error)> LoadShardsAsync(
+        string? database,
+        string prefix,
+        string dateFormat,
+        string logicalName)
+    {
+        var schemaPredicate = database is null ? "DATABASE()" : "@db";
+        var sql = $"""
+            SELECT TABLE_NAME    AS table_name,
+                   TABLE_COMMENT AS table_comment
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = {schemaPredicate}
+              AND TABLE_TYPE = 'BASE TABLE'
+              AND LEFT(TABLE_NAME, CHAR_LENGTH(@prefix)) = @prefix
+            ORDER BY TABLE_NAME
+            """;
+
+        var parameters = new List<SugarParameter>();
+        if (database is not null)
+        {
+            parameters.Add(new SugarParameter("@db", database));
+        }
+
+        parameters.Add(new SugarParameter("@prefix", prefix));
+
+        var dataTable = await _db.Ado.GetDataTableAsync(sql, parameters.ToArray());
+        var indexes = BuildColumnIndexes(dataTable);
+        var shards = new List<ShardTableInfo>();
+
+        foreach (DataRow row in dataTable.Rows)
+        {
+            var tableName = AsText(row, indexes, "table_name");
+            if (tableName.Length == 0)
+            {
+                continue;
+            }
+
+            var suffix = tableName[prefix.Length..];
+            if (!DateTime.TryParseExact(suffix, dateFormat, CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var shardDate))
+            {
+                // 前缀撞上的备份表 / 人工表，不参与分表是有意为之，用 Debug 免得刷日志
+                _logger.LogDebug(
+                    "BI 报表分表 {Table} 的前缀匹配到 {PhysicalTable}，但后缀 {Suffix} 不符合日期格式 {Format}，已忽略。",
+                    logicalName,
+                    tableName,
+                    suffix,
+                    dateFormat);
+                continue;
+            }
+
+            if (!BiIdentifier.IsValid(tableName))
+            {
+                return (new List<ShardTableInfo>(),
+                    $"物理分表名 {tableName} 含不受支持的字符，无法安全拼进 SQL");
+            }
+
+            shards.Add(new ShardTableInfo
+            {
+                TableName = tableName,
+                TableComment = AsText(row, indexes, "table_comment"),
+                PeriodStart = new DateTime(shardDate.Year, shardDate.Month, 1)
+            });
+        }
+
+        // 一个月只能有一张分表。同月多张表时无法判断该读哪一张，宁可整张逻辑表不可用，
+        // 也不要 UNION 两份数据把结果翻倍
+        var duplicateMonth = shards
+            .GroupBy(shard => (shard.PeriodStart.Year, shard.PeriodStart.Month))
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateMonth is not null)
+        {
+            return (new List<ShardTableInfo>(),
+                $"{string.Join("、", duplicateMonth.Select(shard => shard.TableName))} 都落在 " +
+                $"{duplicateMonth.Key.Year}-{duplicateMonth.Key.Month:00}，一个月只能有一张分表");
+        }
+
+        return (shards.OrderBy(shard => shard.PeriodStart).ThenBy(shard => shard.TableName).ToList(), null);
+    }
+
+    /// <summary>
+    /// 读取指定库、指定物理表的字段元数据（表名走参数，配置多打一个引号也只会变成「查不到」）。
+    /// <paramref name="database"/> 为 null 时用 <c>DATABASE()</c>，即当前连接默认库。
+    /// </summary>
+    private async Task<List<MetadataRow>> LoadColumnsAsync(
+        string? database,
+        IReadOnlyCollection<string> tableNames)
+    {
+        if (tableNames.Count == 0)
+        {
+            return new List<MetadataRow>();
+        }
+
+        var parameters = new List<SugarParameter>();
+        if (database is not null)
+        {
+            parameters.Add(new SugarParameter("@db", database));
+        }
+
+        var placeholders = new string[tableNames.Count];
+        var index = 0;
+        foreach (var tableName in tableNames)
+        {
+            placeholders[index] = "@t" + index;
+            parameters.Add(new SugarParameter(placeholders[index], tableName));
+            index++;
+        }
+
+        var schemaPredicate = database is null ? "DATABASE()" : "@db";
+        var sql = $"""
+            SELECT t.TABLE_SCHEMA      AS table_schema,
+                   t.TABLE_NAME        AS table_name,
+                   t.TABLE_COMMENT     AS table_comment,
+                   c.COLUMN_NAME       AS column_name,
+                   c.DATA_TYPE         AS data_type,
+                   c.IS_NULLABLE       AS is_nullable,
+                   c.COLUMN_COMMENT    AS column_comment
+            FROM information_schema.TABLES t
+            JOIN information_schema.COLUMNS c
+              ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+            WHERE t.TABLE_SCHEMA = {schemaPredicate}
+              AND t.TABLE_TYPE = 'BASE TABLE'
+              AND t.TABLE_NAME IN ({string.Join(", ", placeholders)})
+            ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION
+            """;
+
+        var dataTable = await _db.Ado.GetDataTableAsync(sql, parameters.ToArray());
+        return ReadRows(dataTable);
+    }
+
+    private static Dictionary<string, int> BuildColumnIndexes(DataTable dataTable)
     {
         // 列名按 OrdinalIgnoreCase 建索引：不同 MySQL 版本/驱动返回的大小写未必一致，
         // 而 DataTable 的列名比较默认区分大小写，写死字符串取列会在某些环境下标错列
@@ -196,11 +389,19 @@ public sealed class BiReportSchemaCache
             indexes[dataTable.Columns[i].ColumnName] = i;
         }
 
+        return indexes;
+    }
+
+    private static List<MetadataRow> ReadRows(DataTable dataTable)
+    {
+        var indexes = BuildColumnIndexes(dataTable);
+
         var rows = new List<MetadataRow>(dataTable.Rows.Count);
         foreach (DataRow row in dataTable.Rows)
         {
             rows.Add(new MetadataRow
             {
+                TableSchema = AsText(row, indexes, "table_schema"),
                 TableName = AsText(row, indexes, "table_name"),
                 TableComment = AsText(row, indexes, "table_comment"),
                 ColumnName = AsText(row, indexes, "column_name"),
@@ -224,27 +425,111 @@ public sealed class BiReportSchemaCache
         return row[index]?.ToString()?.Trim() ?? string.Empty;
     }
 
-    private BiReportTableSchemaDto? BuildTable(BiReportTableOption tableOption, List<MetadataRow> rows)
+    /// <summary>
+    /// 由物理表元数据构建一张逻辑表。
+    /// <para>
+    /// 分表时取所有物理分表字段的<b>交集</b>：UNION ALL 的内层 SELECT 必须每张表都能提供同一批列，
+    /// 老分表缺列时只暴露公共列，而不是让整条查询在数据库端报「Unknown column」。
+    /// </para>
+    /// </summary>
+    private BiReportTableSchemaDto? BuildTable(
+        BiReportTableOption tableOption,
+        string logicalName,
+        List<MetadataRow> rows,
+        string? database,
+        List<ShardTableInfo>? shards,
+        string? shardDateColumn)
     {
-        // 用数据库里的规范拼写，而不是配置里写的那个：配置写 truck 还是 TRUCK 都行，
-        // 但输出给前端的必须是库里真实的表名，否则前端拿它回填请求时会与元数据对不上
-        var first = rows[0];
+        var rowsByTable = rows
+            .GroupBy(row => row.TableName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var canonicalTableName = logicalName;
+        if (shards is null)
+        {
+            // 普通表用库里的规范拼写：配置写 truck 还是 TRUCK 都行，输出必须是库里真实的表名
+            canonicalTableName = rows[0].TableName;
+            if (!BiIdentifier.IsValid(canonicalTableName))
+            {
+                _logger.LogWarning(
+                    "BI 报表白名单中的表 {Table} 的物理表名含不受支持的字符，无法拼进 SQL，已从元数据中剔除。",
+                    canonicalTableName);
+                return null;
+            }
+        }
+
+        HashSet<string>? commonColumnNames = null;
+        List<MetadataRow> metadataRows;
+        if (shards is null)
+        {
+            metadataRows = rows;
+        }
+        else
+        {
+            commonColumnNames = rowsByTable.Values
+                .Select(group => group.Select(row => row.ColumnName).ToHashSet(StringComparer.OrdinalIgnoreCase))
+                .Aggregate((left, right) =>
+                {
+                    left.IntersectWith(right);
+                    return left;
+                });
+
+            if (commonColumnNames.Count == 0)
+            {
+                _logger.LogWarning(
+                    "BI 报表分表 {Table} 的所有物理分表没有共同字段，已从元数据中剔除。",
+                    logicalName);
+                return null;
+            }
+
+            // 列定义以最新一张分表为准（新加列通常先出现在最新分表上）。
+            // 老分表与最新分表的列集合不一时给出提示，但只暴露交集，保证 UNION 一定成立
+            var newestTable = shards[^1].TableName;
+            metadataRows = rowsByTable[newestTable];
+
+            var unionColumnNames = rowsByTable.Values
+                .SelectMany(group => group.Select(row => row.ColumnName))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (unionColumnNames.Count != commonColumnNames.Count)
+            {
+                _logger.LogWarning(
+                    "BI 报表分表 {Table} 的各物理分表字段不一致：共 {UnionCount} 个字段，只有 {CommonCount} 个在所有分表中都存在。" +
+                    "元数据仅暴露公共字段，缺字段的老分表参与 UNION 时不会报错。",
+                    logicalName,
+                    unionColumnNames.Count,
+                    commonColumnNames.Count);
+            }
+        }
+
+        var first = metadataRows[0];
+        var tableComment = string.IsNullOrWhiteSpace(first.TableComment) && shards is { Count: > 0 }
+            ? shards[^1].TableComment
+            : first.TableComment;
 
         var table = new BiReportTableSchemaDto
         {
-            table_name = first.TableName,
-            table_comment = NullIfEmpty(first.TableComment),
-            display_name = FirstNonEmpty(tableOption.DisplayName, first.TableComment, first.TableName),
-            columns = new List<BiReportColumnSchemaDto>()
+            table_name = canonicalTableName,
+            table_comment = NullIfEmpty(tableComment),
+            display_name = FirstNonEmpty(tableOption.DisplayName, tableComment, canonicalTableName),
+            columns = new List<BiReportColumnSchemaDto>(),
+            database = database,
+            shard_date_column = shardDateColumn,
+            shards = shards?.Select(shard => new BiReportShardSchemaDto
+            {
+                table_name = shard.TableName,
+                period_start = shard.PeriodStart
+            }).ToList() ?? new List<BiReportShardSchemaDto>()
         };
 
         var includeColumns = ToNameSet(tableOption.IncludeColumns);
         var excludeColumns = ToNameSet(tableOption.ExcludeColumns);
         var displayNames = ToDisplayNameMap(tableOption.ColumnDisplayNames);
 
-        foreach (var row in rows)
+        foreach (var row in metadataRows)
         {
-            if (row.ColumnName.Length == 0 || !IsColumnVisible(row.ColumnName, includeColumns, excludeColumns, table.table_name))
+            if (row.ColumnName.Length == 0 ||
+                (commonColumnNames is not null && !commonColumnNames.Contains(row.ColumnName)) ||
+                !IsColumnVisible(row.ColumnName, includeColumns, excludeColumns, table.table_name))
             {
                 continue;
             }
@@ -385,6 +670,8 @@ public sealed class BiReportSchemaCache
     /// <summary>从 <c>INFORMATION_SCHEMA</c> 读回来的一行（一个列）。</summary>
     private sealed class MetadataRow
     {
+        public string TableSchema { get; init; } = string.Empty;
+
         public string TableName { get; init; } = string.Empty;
 
         public string TableComment { get; init; } = string.Empty;
@@ -396,5 +683,16 @@ public sealed class BiReportSchemaCache
         public bool IsNullable { get; init; }
 
         public string ColumnComment { get; init; } = string.Empty;
+    }
+
+    /// <summary>发现到的一张物理分表。</summary>
+    private sealed class ShardTableInfo
+    {
+        public string TableName { get; init; } = string.Empty;
+
+        public string TableComment { get; init; } = string.Empty;
+
+        /// <summary>该分表覆盖月份的 1 日。</summary>
+        public DateTime PeriodStart { get; init; }
     }
 }

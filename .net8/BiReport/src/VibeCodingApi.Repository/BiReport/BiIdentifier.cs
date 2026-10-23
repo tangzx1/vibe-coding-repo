@@ -50,6 +50,19 @@ public static class BiIdentifier
         !string.IsNullOrWhiteSpace(identifier) && SafeIdentifier.IsMatch(identifier);
 
     /// <summary>
+    /// 引用「库名.表名」。库名为空时退化为只引用表名（即当前库）。
+    /// <para>
+    /// MySQL 的库名和表名各自是独立的标识符，不能把 <c>库.表</c> 当成一个字符串交给
+    /// <see cref="Quote"/>——点号会被正则拒绝。这里把两段分别校验、分别加反引号，
+    /// 跨库查询因此仍然只有「合法标识符」能进 SQL。
+    /// </para>
+    /// </summary>
+    public static string QuoteTable(string? database, string table) =>
+        string.IsNullOrWhiteSpace(database)
+            ? Quote(table)
+            : $"{Quote(database)}.{Quote(table)}";
+
+    /// <summary>
     /// MySQL DATA_TYPE 是否数值类型。决定能否 sum / avg，也影响传入值的强转方向。
     /// <para>
     /// <c>year</c> 归在这里（而不是日期类型）：它按 4 位数字比较才有意义，

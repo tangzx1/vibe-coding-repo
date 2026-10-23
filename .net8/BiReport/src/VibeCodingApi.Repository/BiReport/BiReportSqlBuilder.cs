@@ -213,6 +213,10 @@ public static class BiReportSqlBuilder
     /// <summary>参与查询的一张表在本次编译里的绑定关系。</summary>
     private sealed class TableBinding
     {
+        /// <summary>本次查询实际引用到的列（select / where / join / group by / order by）。</summary>
+        private readonly Dictionary<string, BiReportColumnSchemaDto> _usedColumns =
+            new(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>在请求 <c>tables</c> 数组里的下标，用于生成 t0 / t1 / t2…</summary>
         public int Index { get; init; }
 
@@ -223,6 +227,64 @@ public static class BiReportSqlBuilder
         public string UserAlias { get; init; } = string.Empty;
 
         public BiReportTableSchemaDto Schema { get; init; } = null!;
+
+        /// <summary>按 WHERE 里的日期过滤裁剪后、本次查询要扫的物理分表；普通表为空。</summary>
+        public IReadOnlyList<BiReportShardSchemaDto> SelectedShards { get; set; } =
+            Array.Empty<BiReportShardSchemaDto>();
+
+        /// <summary>日期范围与所有分表都不相交时为 true，生成一个恒假分支让查询返回空集。</summary>
+        public bool EmptyShardRange { get; set; }
+
+        /// <summary>记录一个列被引用，供分表只 SELECT 需要的列。</summary>
+        public void MarkUsed(BiReportColumnSchemaDto column) =>
+            _usedColumns.TryAdd(column.column_name, column);
+
+        /// <summary>
+        /// 生成 FROM / JOIN 里的数据源表达式。
+        /// <para>
+        /// 普通表：<c>`库`.`表`</c>（未配置库时只写表名）。
+        /// 分表：把选中的物理分表 UNION ALL 成派生表，外层仍然用 t0 / t1… 引用，
+        /// 因此 join / 过滤 / 聚合的写法与普通表完全一致。
+        /// </para>
+        /// <para>
+        /// 内层只 SELECT 本次查询真正引用到的列：分表通常很宽，SELECT * 会让 UNION 变重，
+        /// 也会把未暴露的敏感列带进派生表（虽然外层引用不到）。
+        /// </para>
+        /// </summary>
+        public string BuildSourceSql()
+        {
+            if (Schema.shards is not { Count: > 0 })
+            {
+                return BiIdentifier.QuoteTable(Schema.database, Schema.table_name);
+            }
+
+            var columns = Schema.columns
+                .Where(column => _usedColumns.ContainsKey(column.column_name))
+                .Select(column => BiIdentifier.Quote(column.column_name))
+                .ToList();
+            var selectList = columns.Count > 0 ? string.Join(", ", columns) : "1 AS x";
+
+            IReadOnlyList<BiReportShardSchemaDto> shards = SelectedShards;
+            var empty = EmptyShardRange;
+
+            if (shards.Count == 0)
+            {
+                // 日期范围与任何分表都不相交：仍然要生成一条合法 SQL，
+                // 用最后一张分表加恒假条件，结果为空且不会扫全表
+                shards = new[] { Schema.shards[^1] };
+                empty = true;
+            }
+
+            var branches = shards.Select(shard =>
+            {
+                var source = BiIdentifier.QuoteTable(Schema.database, shard.table_name);
+                return empty
+                    ? $"SELECT {selectList} FROM {source} WHERE 1=0"
+                    : $"SELECT {selectList} FROM {source}";
+            });
+
+            return "(" + string.Join(" UNION ALL ", branches) + ")";
+        }
     }
 
     /// <summary>已解析到具体表与列的字段引用。</summary>
@@ -235,6 +297,8 @@ public static class BiReportSqlBuilder
             // 在这里就把反引号拼好：列名来自元数据、别名来自服务端下标，都是可信的，
             // 而且只算一次，避免在拼接过程中反复校验
             Qualified = $"{table.SqlAlias}.{BiIdentifier.Quote(column.column_name)}";
+            // 同时登记到表绑定上：分表的内层 SELECT 只需要带这些列
+            table.MarkUsed(column);
         }
 
         public TableBinding Table { get; }
@@ -312,17 +376,23 @@ public static class BiReportSqlBuilder
             }
 
             _bindings = BindTables();
-            var joinSql = BuildJoinSql();
+
+            // 先完成所有列引用解析（join / select / where / group / order），
+            // 才能知道每张分表需要 SELECT 哪些列；FROM / JOIN 文本放到最后生成。
+            var joinOrder = BuildJoinOrder();
             _select = BuildSelectList();
             var whereSql = BuildWhere();
             var groupBySql = BuildGroupBy();
             var orderBySql = BuildOrderBy();
 
+            // WHERE 里的日期条件已经解析完，再据此裁剪分表；不会影响已经生成的 WHERE 文本
+            SelectShards();
+
             var compiled = new CompiledQuery
             {
                 SelectListSql = _select.Sql,
-                FromSql = $"FROM {BiIdentifier.Quote(_bindings[0].Schema.table_name)} AS {_bindings[0].SqlAlias}",
-                JoinSql = joinSql,
+                FromSql = $"FROM {_bindings[0].BuildSourceSql()} AS {_bindings[0].SqlAlias}",
+                JoinSql = BuildJoinSql(joinOrder),
                 WhereSql = whereSql,
                 GroupBySql = groupBySql,
                 OrderBySql = orderBySql
@@ -396,7 +466,8 @@ public static class BiReportSqlBuilder
         }
 
         /// <summary>
-        /// 校验关联关系并按主表定序，拼出 JOIN 子句。
+        /// 校验关联关系并按主表定序，返回已排序的关联边（真正拼 JOIN 子句在
+        /// <see cref="BuildJoinSql"/>，那时才知道分表要 SELECT 哪些列）。
         /// <para>
         /// 判据是「无向连通图 + 边数 = 节点数 − 1」⟺ 一棵树。树上没有环，从主表按 BFS 顺序输出，
         /// 每个 ON 引用的表必定已经出现在前面的 FROM/JOIN 里，SQL 语法必然成立，
@@ -408,7 +479,7 @@ public static class BiReportSqlBuilder
         /// 「以主表为基准补明细」的直觉行为。
         /// </para>
         /// </summary>
-        private string BuildJoinSql()
+        private List<(ValidatedJoin Join, TableBinding Added)> BuildJoinOrder()
         {
             var joins = _request.joins ?? new List<BiReportJoinDto>();
 
@@ -419,7 +490,7 @@ public static class BiReportSqlBuilder
                     throw new BusinessException("只查询一张表时不需要指定关联条件");
                 }
 
-                return string.Empty;
+                return new List<(ValidatedJoin, TableBinding)>();
             }
 
             if (joins.Count != _bindings.Count - 1)
@@ -482,13 +553,22 @@ public static class BiReportSqlBuilder
                     $"表 {string.Join("、", unreachable)} 没有和主表 {_bindings[0].UserAlias} 连接，会形成笛卡尔积");
             }
 
+            return emitted;
+        }
+
+        /// <summary>
+        /// 把已定序的关联边渲染成 JOIN 子句。必须在所有列引用解析完之后调用：
+        /// 分表的数据源表达式取决于本次查询实际用到了哪些列（见 <see cref="TableBinding.BuildSourceSql"/>）。
+        /// </summary>
+        private static string BuildJoinSql(List<(ValidatedJoin Join, TableBinding Added)> emitted)
+        {
             var builder = new StringBuilder();
             foreach (var (join, added) in emitted)
             {
                 // ON 的两侧都用限定列引用：它们各自带着自己那张表的 tN 前缀，
                 // 所以无论 BFS 从哪个方向走到这条边，等式的两边都是对的
                 builder.Append(' ').Append(join.JoinKeyword)
-                    .Append(' ').Append(BiIdentifier.Quote(added.Schema.table_name))
+                    .Append(' ').Append(added.BuildSourceSql())
                     .Append(" AS ").Append(added.SqlAlias)
                     .Append(" ON ").Append(join.LeftColumn.Qualified)
                     .Append(" = ").Append(join.RightColumn.Qualified);
@@ -873,12 +953,144 @@ public static class BiReportSqlBuilder
                 var idColumn = FindColumn(_bindings[0].Schema, "id");
                 if (idColumn is not null)
                 {
-                    expressions.Add($"{_bindings[0].SqlAlias}.{BiIdentifier.Quote(idColumn.column_name)} ASC");
+                    // 走 ResolvedColumn 而不是手拼字符串：它会把这个列登记到表绑定上，
+                    // 分表的内层 SELECT 才会带上排序用的 id
+                    expressions.Add($"{new ResolvedColumn(_bindings[0], idColumn).Qualified} ASC");
                 }
             }
 
             return expressions.Count == 0 ? string.Empty : " ORDER BY " + string.Join(", ", expressions);
         }
+
+        /// <summary>
+        /// 按 WHERE 里对分表日期字段的过滤，裁剪本次实际要扫的物理分表。
+        /// <para>
+        /// 只做「月份级」裁剪，且刻意偏保守：<c>&gt;</c> / <c>&lt;</c> 也把边界所在月保留进来，
+        /// 因为日期可能带时分秒。裁剪只影响扫哪些物理表，不改变查询语义——真正的精确过滤仍然由
+        /// WHERE 子句执行。没有任何可用日期条件时扫描全部分表。
+        /// </para>
+        /// <para>
+        /// 注意这里的 <see cref="ResolveColumn"/> 调用发生在 <see cref="BuildWhere"/> 之后：
+        /// 非法字段/运算符已经在 WHERE 构建时给出准确错误，这里即使解析失败也只是保守地不裁剪。
+        /// </para>
+        /// </summary>
+        private void SelectShards()
+        {
+            foreach (var binding in _bindings)
+            {
+                var shards = binding.Schema.shards;
+                if (shards is not { Count: > 0 })
+                {
+                    continue;
+                }
+
+                if (shards.Count == 1 || string.IsNullOrWhiteSpace(binding.Schema.shard_date_column))
+                {
+                    binding.SelectedShards = shards;
+                    continue;
+                }
+
+                var dateColumn = FindColumn(binding.Schema, binding.Schema.shard_date_column);
+                if (dateColumn is null || !BiIdentifier.IsDateType(dateColumn.data_type))
+                {
+                    binding.SelectedShards = shards;
+                    continue;
+                }
+
+                int? minMonth = null;
+                int? maxMonth = null;
+                HashSet<int>? includedMonths = null;
+
+                foreach (var filter in _request.where ?? new List<BiReportFilterDto>())
+                {
+                    if (filter is null || string.IsNullOrWhiteSpace(filter.field))
+                    {
+                        continue;
+                    }
+
+                    ResolvedColumn resolved;
+                    try
+                    {
+                        resolved = ResolveColumn(filter.field.Trim());
+                    }
+                    catch (BusinessException)
+                    {
+                        continue;
+                    }
+
+                    if (resolved.Table.Index != binding.Index ||
+                        !string.Equals(resolved.Column.column_name, dateColumn.column_name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    switch (NormalizeOperator(filter.op))
+                    {
+                        case "=":
+                        {
+                            var month = MonthIndexOf(dateColumn, filter);
+                            minMonth = MaxMonth(minMonth, month);
+                            maxMonth = MinMonth(maxMonth, month);
+                            break;
+                        }
+
+                        case ">":
+                        case ">=":
+                            minMonth = MaxMonth(minMonth, MonthIndexOf(dateColumn, filter));
+                            break;
+
+                        case "<":
+                        case "<=":
+                            maxMonth = MinMonth(maxMonth, MonthIndexOf(dateColumn, filter));
+                            break;
+
+                        case "between":
+                        {
+                            var values = BiValueCoercion.CoerceArray(
+                                filter.value, dateColumn.data_type, filter.field, 2, 2);
+                            minMonth = MaxMonth(minMonth, MonthIndexOf(values[0]));
+                            maxMonth = MinMonth(maxMonth, MonthIndexOf(values[1]));
+                            break;
+                        }
+
+                        case "in":
+                        {
+                            var values = BiValueCoercion.CoerceArray(
+                                filter.value, dateColumn.data_type, filter.field, 1, _options.MaxInValues);
+                            var months = values.Select(MonthIndexOf).ToHashSet();
+                            includedMonths = includedMonths is null
+                                ? months
+                                : includedMonths.Intersect(months).ToHashSet();
+                            break;
+                        }
+                    }
+                }
+
+                var selected = shards.Where(shard =>
+                {
+                    var month = MonthIndexOf(shard.period_start);
+                    return (minMonth is null || month >= minMonth) &&
+                           (maxMonth is null || month <= maxMonth) &&
+                           (includedMonths is null || includedMonths.Contains(month));
+                }).ToList();
+
+                binding.SelectedShards = selected;
+                binding.EmptyShardRange = selected.Count == 0;
+            }
+        }
+
+        private static int MonthIndexOf(BiReportColumnSchemaDto dateColumn, BiReportFilterDto filter) =>
+            MonthIndexOf(BiValueCoercion.CoerceScalar(filter.value, dateColumn.data_type, filter.field));
+
+        private static int MonthIndexOf(object value) => value is DateTime date
+            ? date.Year * 12 + date.Month - 1
+            : throw new BusinessException("分表日期字段的过滤值不是日期类型");
+
+        private static int? MaxMonth(int? current, int value) =>
+            current is null ? value : Math.Max(current.Value, value);
+
+        private static int? MinMonth(int? current, int value) =>
+            current is null ? value : Math.Min(current.Value, value);
 
         /// <summary>
         /// 解析 GROUP BY / ORDER BY 里的一个引用：先按输出别名匹配，再当作字段引用解析。
